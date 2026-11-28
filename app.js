@@ -75,7 +75,7 @@
     var x = sess(); if (!x) return Promise.reject({ auth: true })
     useAccount(x.uid)
     return rest('profiles?select=name,school,student_id,is_admin&id=eq.' + x.uid).then(function (p) { if (p[0]) st.user = { name: p[0].name, school: p[0].school, sid: p[0].student_id, admin: !!p[0].is_admin } }).then(flushPending).then(function () {
-      return rest('attempts?select=id,exam_id,name,cluster,score,total,seconds,ans,items,taken_at&order=taken_at.desc&limit=300')
+      return rest('attempts?select=id,exam_id,name,cluster,score,total,seconds,ans,items,taken_at&user_id=eq.' + x.uid + '&order=taken_at.desc&limit=300')
     }).then(function (rows) {
       st.hist = rows.reverse().map(function (a) { return { id: a.id, exam_id: a.exam_id, name: a.name, cluster: a.cluster, score: a.score, total: a.total, ans: a.ans, items: a.items, ts: Date.parse(a.taken_at) } })
       indexAttempts(); save()
@@ -157,7 +157,7 @@
     h(html)
     $('#lo').onclick = logout
     $('#acct').onclick = showAccount
-    if ($('#adm')) $('#adm').onclick = showAdmin
+    if ($('#adm')) $('#adm').onclick = function () { showAdmin() }
     if (st.active) { $('#resume').onclick = resume; $('#drop').onclick = function () { st.active = null; save(); showList() } }
     main.querySelectorAll('[data-c]').forEach(function (a) { a.onclick = function (ev) { ev.preventDefault(); clusterOpen[a.dataset.c] = !clusterOpen[a.dataset.c]; var y = window.scrollY; showList(); window.scrollTo(0, y) } })
     main.querySelectorAll('[data-e]').forEach(function (b) { b.onclick = function () { instructions(examById(b.dataset.e)) } })
@@ -324,55 +324,167 @@
   }
 
   var SCHOOL = 'A.B. Lucas S.S.'
-  function showAdmin() {
-    clearInterval(timerId); test = null; document.body.className = ''; mark('admin'); $('#leg').innerHTML = ''; setBar('Admin - Students')
+  var adm = { tab: 'overview', q: '', f: 'all', k: 'name', dir: 1, sel: {}, rows: [], view: [] }
+  function demoOn() { try { return localStorage.getItem('decaweb.demo') === '1' } catch (e) { return false } }
+  function setDemo(v) { try { localStorage.setItem('decaweb.demo', v ? '1' : '0') } catch (e) {} }
+  function ago(ts) { if (!ts) return 'never'; var d = Math.floor((Date.now() - Date.parse(ts)) / 864e5); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : d + ' days ago' }
+  function dur(s) { s = Math.round(s || 0); return Math.floor(s / 60) + 'm ' + (s % 60) + 's' }
+  function aErr(e) { var b = $('#a_body'); if (b) b.textContent = 'Error: ' + (e && e.msg || 'could not load') }
+  var TD = 'padding:3px 24px 3px 0'
+  function showAdmin(tab) {
+    clearInterval(timerId); test = null; document.body.className = ''; mark('admin'); $('#leg').innerHTML = ''; setBar('Admin')
     topright.innerHTML = '<button id="home">Test list</button>'; $('#home').onclick = showList
-    h('<div class="box"><h3>Add student</h3><div class="body">' +
-      '<table style="border-collapse:collapse"><tr><td style="padding:3px 8px 3px 0">Name</td><td><input id="a_n" size="30"></td></tr>' +
-      '<tr><td style="padding:3px 8px 3px 0">Email</td><td><input id="a_e" size="30"></td></tr>' +
-            '<tr><td style="padding:3px 8px 3px 0">Password</td><td><input id="a_p" size="30" value="48onDECA"></td></tr></table>' +
-      '<p><button id="a_add">Add student</button></p>' +
-      '<p>Or add many: one per line, as <i>Name, email</i> .</p>' +
-      '<textarea id="a_bulk" rows="6" cols="60"></textarea><p><button id="a_bulkgo">Add all</button></p>' +
-      '<div id="a_msg"></div></div></div>' +
-      '<div class="box"><h3>Students</h3><div class="body" id="a_list">Loading...</div></div>')
-    var pw = function () { return $('#a_p').value || '48onDECA' }
+    if (typeof tab === 'string') adm.tab = tab
+    adminDraw()
+  }
+  function adminDraw() {
+    var tabs = [['overview', 'Overview'], ['students', 'Students'], ['add', 'Add students']]
+    h('<div style="margin:8px 0">' + tabs.map(function (t) { return '<button data-t="' + t[0] + '" style="margin-right:6px;' + (adm.tab === t[0] ? 'font-weight:bold;background:#ccc' : '') + '">' + t[1] + '</button>' }).join('') + '</div><div id="a_body">Loading...</div>')
+    main.querySelectorAll('[data-t]').forEach(function (b) { b.onclick = function () { adm.tab = b.dataset.t; adminDraw() } })
+    if (adm.tab === 'overview') aOverview(); else if (adm.tab === 'students') aStudents(); else aAdd()
+  }
+  function box(title, body) { return '<div class="box"><h3>' + title + '</h3><div class="body">' + body + '</div></div>' }
+  function aOverview() {
+    Promise.all([rpc('admin_overview'), rpc('admin_students2')]).then(function (res) {
+      var o = res[0], S = res[1].filter(function (s) { return !s.is_admin })
+      var tile = function (a, b) { return '<tr><td style="' + TD + '">' + a + '</td><td><b>' + b + '</b></td></tr>' }
+      var tb = function (head, rows) { return '<table class="tests" style="width:100%;min-width:0"><tr>' + head.map(function (x) { return '<td><b>' + x + '</b></td>' }).join('') + '</tr>' + rows.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + c + '</td>' }).join('') + '</tr>' }).join('') + '</table>' }
+      var html = box('Summary', '<table>' + tile('Students', o.students) + tile('Active today', o.active1) + tile('Active in the last 7 days', o.active7 + ' of ' + o.students) + tile('Have not taken a test yet', o.never_tested) + tile('Have never signed in', o.never_signed_in) + tile('Tests taken (all time / last 7 days)', o.tests + ' / ' + o.tests7) + tile('Questions answered', o.questions) + tile('Average score', o.avg == null ? '-' : o.avg + '%') + tile('Average time per test', o.tests ? dur(o.avg_seconds) : '-') + '</table>')
+      var mx = Math.max.apply(null, o.daily.map(function (d) { return d.n }).concat([1]))
+      html += box('Tests per day (last 14 days)', bars(o.daily.map(function (d) { return { label: d.d, v: 100 * d.n / mx, right: d.n + (d.n ? ' - avg ' + d.avg + '%' : '') } }), '#3b82f6'))
+      var dt = o.dist.b0 + o.dist.b50 + o.dist.b70 + o.dist.b85 || 1
+      html += box('Score spread (all tests)', bars([['Under 50%', o.dist.b0, '#d9534f'], ['50 - 69%', o.dist.b50, '#f0ad4e'], ['70 - 84%', o.dist.b70, '#5cb85c'], ['85% and up', o.dist.b85, '#3b82f6']].map(function (x) { return { label: x[0], v: 100 * x[1] / dt, right: x[1] + ' tests', color: x[2] } }), '#3b82f6'))
+      html += box('Performance indicators missed most (all students)', o.pis.length ? bars(o.pis.map(function (p) { return { label: (p.pi || 'No PI') + (p.txt ? ' - ' + p.txt : ''), title: p.pi + ' ' + p.txt, v: 100 * p.wrong / p.seen, right: p.wrong + ' wrong of ' + p.seen, color: '#d9534f' } }), '#d9534f') : 'No data yet.')
+      var ar = o.areas.slice().sort(function (a, b) { return (a.seen - a.wrong) / a.seen - (b.seen - b.wrong) / b.seen })
+      html += box('Accuracy by topic area (weakest first)', ar.length ? bars(ar.map(function (a) { var p = Math.round(100 * (a.seen - a.wrong) / a.seen); return { label: a.area, v: p, right: p + '% (' + a.seen + ' seen)', color: p >= 70 ? '#5cb85c' : '#f0ad4e' } }), '#3b82f6') : 'No data yet.')
+      html += box('Questions missed most', o.qs.length ? o.qs.map(function (q) { return '<div style="margin:6px 0">Missed ' + q.n + ' time' + (q.n > 1 ? 's' : '') + ' by ' + q.people + ' student' + (q.people > 1 ? 's' : '') + ': ' + esc(q.q) + '...</div>' }).join('') : 'No data yet.')
+      html += box('Most taken exams', o.exams.length ? tb(['Exam', 'Times taken', 'Average'], o.exams.slice(0, 15).map(function (e) { return [esc(e.name), e.n, e.avg + '%'] })) : 'No data yet.')
+      var low = o.exams.filter(function (e) { return e.n >= 2 }).sort(function (a, b) { return a.avg - b.avg }).slice(0, 10)
+      if (low.length) html += box('Hardest exams (lowest average, taken 2+ times)', tb(['Exam', 'Times taken', 'Average'], low.map(function (e) { return [esc(e.name), e.n, e.avg + '%'] })))
+      html += box('Average by cluster', o.clusters.length ? bars(o.clusters.map(function (c) { return { label: c.cluster, v: c.avg, right: c.avg + '% (' + c.n + ' tests)' } }), '#3b82f6') : 'No data yet.')
+      html += box('Top students (2+ tests)', o.top.length ? tb(['Student', 'Tests', 'Average'], o.top.map(function (t) { return [esc(t.name), t.n, t.avg + '%'] })) : 'Nobody has taken 2 tests yet.')
+      var ina = S.filter(function (s) { return !s.last_test || Date.now() - Date.parse(s.last_test) > 7 * 864e5 }).sort(function (a, b) { return (a.last_test ? Date.parse(a.last_test) : 0) - (b.last_test ? Date.parse(b.last_test) : 0) }).slice(0, 15)
+      html += box('Needs a nudge (no test in 7 days)', ina.length ? tb(['Student', 'Email', 'Last test', 'Last sign in'], ina.map(function (s) { return [esc(s.name), esc(s.email), s.last_test ? ago(s.last_test) : 'never', ago(s.last_sign_in)] })) : 'Everyone has taken a test this week.')
+      html += box('Recent tests', o.recent.length ? tb(['When', 'Student', 'Exam', 'Score'], o.recent.map(function (r) { return [new Date(r.taken_at).toLocaleString(), esc(r.student), esc(r.name), r.score + '/' + r.total + ' (' + Math.round(100 * r.score / r.total) + '%)'] })) : 'No tests yet.')
+      $('#a_body').innerHTML = html
+    }).catch(aErr)
+  }
+  function aStudents() {
+    rpc('admin_students2').then(function (rows) {
+      adm.rows = rows.filter(function (r) { return !r.is_admin }); adm.sel = {}
+      $('#a_body').innerHTML = '<div class="box"><h3>Students (<span id="a_cnt"></span>)</h3><div class="body">' +
+        '<input id="a_q" placeholder="Search name or email" size="28" value="' + esc(adm.q) + '"> ' +
+        '<select id="a_f"><option value="all">All students</option><option value="active">Active this week</option><option value="inactive">No test in 7 days</option><option value="notest">Never taken a test</option><option value="nosignin">Never signed in</option></select> ' +
+        '<button id="a_csv">Export CSV</button> <button id="a_bpw">Reset password (selected)</button> <button id="a_brm">Remove (selected)</button>' +
+        '<div id="a_tbl" style="margin-top:10px"></div></div></div>'
+      $('#a_f').value = adm.f
+      $('#a_q').oninput = function () { adm.q = this.value; aTable() }
+      $('#a_f').onchange = function () { adm.f = this.value; aTable() }
+      var picked = function () { return Object.keys(adm.sel).filter(function (e) { return adm.sel[e] }) }
+      var each = function (list, fn) { return list.reduce(function (p, e) { return p.then(function () { return fn(e) }) }, Promise.resolve()) }
+      $('#a_csv').onclick = function () {
+        var q = function (x) { return '"' + String(x == null ? '' : x).replace(/"/g, '""') + '"' }
+        var csv = 'Name,Email,School,Tests,Average %,Best %,Last test,Last sign in\n' + adm.view.map(function (r) { return [r.name, r.email, r.school, r.tests, r.avg, r.best, r.last_test || '', r.last_sign_in || ''].map(q).join(',') }).join('\n')
+        download('students.csv', csv, 'text/csv')
+      }
+      $('#a_bpw').onclick = function () {
+        var l = picked(); if (!l.length) return alert('Tick the students first.')
+        var p = prompt('New password for ' + l.length + ' student(s)', '48onDECA'); if (!p) return
+        each(l, function (e) { return rpc('admin_set_password', { p_email: e, p_password: p }) }).then(function () { alert('Password changed for ' + l.length + ' student(s).') }, function (e) { alert(e.msg) })
+      }
+      $('#a_brm').onclick = function () {
+        var l = picked(); if (!l.length) return alert('Tick the students first.')
+        if (!confirm('Remove ' + l.length + ' student(s) and all their saved tests? This cannot be undone.')) return
+        each(l, function (e) { return rpc('admin_remove_student', { p_email: e }) }).then(aStudents, function (e) { alert(e.msg); aStudents() })
+      }
+      aTable()
+    }).catch(aErr)
+  }
+  function aTable() {
+    var now = Date.now(), wk = 7 * 864e5, q = adm.q.toLowerCase(), k = adm.k
+    var rows = adm.rows.filter(function (r) {
+      if (q && (r.name + ' ' + r.email).toLowerCase().indexOf(q) < 0) return false
+      var lt = r.last_test ? Date.parse(r.last_test) : 0
+      if (adm.f === 'active') return lt && now - lt < wk
+      if (adm.f === 'inactive') return !lt || now - lt >= wk
+      if (adm.f === 'notest') return !r.tests
+      if (adm.f === 'nosignin') return !r.last_sign_in
+      return true
+    })
+    var val = function (r) { var v = r[k]; if (k === 'name' || k === 'email') return String(v || '').toLowerCase(); if (k === 'last_test' || k === 'last_sign_in') return v ? Date.parse(v) : 0; return v == null ? -1 : +v }
+    rows.sort(function (a, b) { var x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * adm.dir })
+    adm.view = rows; $('#a_cnt').textContent = rows.length + ' of ' + adm.rows.length
+    var th = function (key, label) { return '<td><b><a href="#" data-k="' + key + '" style="color:inherit">' + label + (adm.k === key ? (adm.dir > 0 ? ' &#9650;' : ' &#9660;') : '') + '</a></b></td>' }
+    var allOn = rows.length && rows.every(function (r) { return adm.sel[r.email] })
+    $('#a_tbl').innerHTML = '<table class="tests" style="width:100%;min-width:0"><tr><td><input type="checkbox" id="a_all"' + (allOn ? ' checked' : '') + '></td>' + th('name', 'Name') + th('email', 'Email') + th('tests', 'Tests') + th('avg', 'Average') + th('best', 'Best') + th('last_test', 'Last test') + th('last_sign_in', 'Last sign in') + '<td></td></tr>' +
+      (rows.length ? rows.map(function (r, i) { return '<tr><td><input type="checkbox" data-s="' + i + '"' + (adm.sel[r.email] ? ' checked' : '') + '></td><td>' + esc(r.name) + '</td><td>' + esc(r.email) + '</td><td>' + r.tests + '</td><td>' + (r.avg == null ? '' : r.avg + '%') + '</td><td>' + (r.best == null ? '' : r.best + '%') + '</td><td>' + (r.last_test ? ago(r.last_test) : 'never') + '</td><td>' + ago(r.last_sign_in) + '</td><td><button data-v="' + i + '">View</button></td></tr>' }).join('') : '<tr><td colspan="9">No students match.</td></tr>') + '</table>'
+    $('#a_tbl').querySelectorAll('[data-k]').forEach(function (a) { a.onclick = function (ev) { ev.preventDefault(); if (adm.k === a.dataset.k) adm.dir = -adm.dir; else { adm.k = a.dataset.k; adm.dir = (adm.k === 'name' || adm.k === 'email') ? 1 : -1 } aTable() } })
+    $('#a_all').onchange = function () { var on = this.checked; rows.forEach(function (r) { adm.sel[r.email] = on }); aTable() }
+    $('#a_tbl').querySelectorAll('[data-s]').forEach(function (c) { c.onchange = function () { adm.sel[rows[+c.dataset.s].email] = c.checked; var a = $('#a_all'); if (a) a.checked = rows.every(function (r) { return adm.sel[r.email] }) } })
+    $('#a_tbl').querySelectorAll('[data-v]').forEach(function (b) { b.onclick = function () { aDetail(rows[+b.dataset.v].email) } })
+  }
+  function aDetail(email) {
+    $('#a_body').textContent = 'Loading...'
+    rpc('admin_student_detail', { p_email: email }).then(function (d) {
+      var p = d.profile, T = d.tests, sc = 0, den = 0, secs = 0
+      T.forEach(function (t) { sc += t.score; den += t.total; secs += t.seconds || 0 })
+      var tile = function (a, b) { return '<tr><td style="' + TD + '">' + a + '</td><td><b>' + b + '</b></td></tr>' }
+      var html = '<p><button id="d_back">&laquo; All students</button></p>' +
+        box(esc(p.name), '<table>' + tile('Email (Student ID)', esc(p.email)) + tile('School', esc(p.school)) + tile('Account created', new Date(p.created).toLocaleDateString()) + tile('Last sign in', p.last_sign_in ? new Date(p.last_sign_in).toLocaleString() : 'never') + tile('Tests taken', T.length) + tile('Average score', den ? Math.round(1000 * sc / den) / 10 + '%' : '-') + tile('Average time per test', T.length ? dur(secs / T.length) : '-') + '</table>' +
+          '<p><button id="d_ren">Rename</button> <button id="d_pw">Reset password</button> <button id="d_clr">Clear test history</button> <button id="d_rm">Remove student</button></p>')
+      html += box('Tests', T.length ? '<table class="tests" style="width:100%;min-width:0"><tr><td><b>Date</b></td><td><b>Exam</b></td><td><b>Score</b></td><td><b>Time</b></td></tr>' + T.map(function (t) { return '<tr><td>' + new Date(t.taken_at).toLocaleString() + '</td><td>' + esc(t.name) + '</td><td>' + t.score + '/' + t.total + ' (' + Math.round(100 * t.score / t.total) + '%)</td><td>' + dur(t.seconds) + '</td></tr>' }).join('') + '</table>' : 'No tests yet.')
+      html += box('Performance indicators missed most', d.pis.length ? bars(d.pis.map(function (x) { return { label: (x.pi || 'No PI') + (x.txt ? ' - ' + x.txt : ''), v: 100 * x.wrong / x.seen, right: x.wrong + ' wrong of ' + x.seen, color: '#d9534f' } }), '#d9534f') : 'Nothing missed yet.')
+      var ar = d.areas.slice().sort(function (a, b) { return (a.seen - a.wrong) / a.seen - (b.seen - b.wrong) / b.seen })
+      html += box('Accuracy by topic area (weakest first)', ar.length ? bars(ar.map(function (a) { var q = Math.round(100 * (a.seen - a.wrong) / a.seen); return { label: a.area, v: q, right: q + '% (' + a.seen + ' seen)', color: q >= 70 ? '#5cb85c' : '#f0ad4e' } }), '#3b82f6') : 'No data yet.')
+      $('#a_body').innerHTML = html
+      $('#d_back').onclick = function () { adminDraw() }
+      $('#d_ren').onclick = function () { var n = prompt('Student name', p.name); if (!n || !n.trim()) return; rpc('admin_update_student', { p_email: email, p_name: n, p_school: p.school || SCHOOL }).then(function () { aDetail(email) }, function (e) { alert(e.msg) }) }
+      $('#d_pw').onclick = function () { var n = prompt('New password for ' + email, '48onDECA'); if (!n) return; rpc('admin_set_password', { p_email: email, p_password: n }).then(function () { alert('Password changed.') }, function (e) { alert(e.msg) }) }
+      $('#d_clr').onclick = function () { if (!confirm('Delete all ' + T.length + ' saved tests for ' + p.name + '? This cannot be undone.')) return; rpc('admin_clear_history', { p_email: email }).then(function () { aDetail(email) }, function (e) { alert(e.msg) }) }
+      $('#d_rm').onclick = function () { if (!confirm('Remove ' + p.name + ' (' + email + ') and all their saved tests? This cannot be undone.')) return; rpc('admin_remove_student', { p_email: email }).then(function () { adminDraw() }, function (e) { alert(e.msg) }) }
+    }).catch(aErr)
+  }
+  function aAdd() {
+    var step = 1
+    var steps = [['a_n', 'Type the student\'s full name in the Name box.'], ['a_e', 'Type their email address. They will use it as their Student ID to sign in.'], ['a_p', 'Check the password. Everyone gets 48onDECA unless you change it here. Tell the student what it is.'], ['a_add', 'Press the Add student button.'], ['a_msg', 'Check the result. "created" means the account is ready. Give the student their email and password.'], ['a_bulk', 'To add a whole class at once, paste one student per line as Name, email, then press Add all. You are done.']]
+    $('#a_body').innerHTML = '<p><label><input type="checkbox" id="a_demo"' + (demoOn() ? ' checked' : '') + '> Show step-by-step guide</label></p><div id="a_guide"></div>' +
+      box('Add student', '<table style="border-collapse:collapse"><tr><td style="padding:3px 8px 3px 0">Name</td><td><input id="a_n" size="30"></td></tr>' +
+        '<tr><td style="padding:3px 8px 3px 0">Email</td><td><input id="a_e" size="30"></td></tr>' +
+        '<tr><td style="padding:3px 8px 3px 0">Password</td><td><input id="a_p" size="30" value="48onDECA"></td></tr></table>' +
+        '<p><button id="a_add">Add student</button></p>' +
+        '<p>Or add many: one per line, as <i>Name, email</i>.</p>' +
+        '<textarea id="a_bulk" rows="6" cols="60"></textarea><p><button id="a_bulkgo">Add all</button></p>' +
+        '<div id="a_msg" style="min-height:24px"></div>')
+    var guide = function () {
+      var g = $('#a_guide'); steps.forEach(function (s) { $('#' + s[0]).style.outline = '' })
+      if (!$('#a_demo').checked) { g.innerHTML = ''; return }
+      var s = steps[step - 1], el = $('#' + s[0]); el.style.outline = '3px solid #f0ad4e'
+      g.innerHTML = '<div style="border:2px solid #f0ad4e;padding:10px;margin:0 0 12px;background:#fff8e6"><b>Step ' + step + ' of ' + steps.length + ':</b> ' + esc(s[1]) + '<p style="margin:8px 0 0"><button id="g_b"' + (step === 1 ? ' disabled' : '') + '>Back</button> <button id="g_n">' + (step === steps.length ? 'Finish' : 'Next') + '</button></p></div>'
+      if (el.focus && /INPUT|TEXTAREA/.test(el.tagName)) el.focus()
+      $('#g_b').onclick = function () { step--; guide() }
+      $('#g_n').onclick = function () { if (step === steps.length) { $('#a_demo').checked = false; setDemo(false); step = 1 } else step++; guide() }
+    }
+    $('#a_demo').onchange = function () { setDemo(this.checked); step = 1; guide() }
     var msg = function (t) { $('#a_msg').innerHTML = t }
     var send = function (rows) {
       if (!rows.length) return msg('Nothing to add.')
       msg('Adding...')
-      rpc('admin_add_students', { p_rows: rows, p_password: pw() }).then(function (out) {
+      rpc('admin_add_students', { p_rows: rows, p_password: $('#a_p').value || '48onDECA' }).then(function (out) {
         msg('<table class="tests" style="min-width:0"><tr><td><b>Name</b></td><td><b>Email</b></td><td><b>Result</b></td></tr>' + out.map(function (o) { return '<tr><td>' + esc(o.name) + '</td><td>' + esc(o.email) + '</td><td>' + esc(o.status) + '</td></tr>' }).join('') + '</table>')
-        if (out.some(function (o) { return o.status === 'created' })) { $('#a_n').value = $('#a_e').value = ''; $('#a_bulk').value = '' }
-        list()
+        if (out.some(function (o) { return o.status === 'created' })) { $('#a_n').value = ''; $('#a_e').value = ''; $('#a_bulk').value = '' }
+        if ($('#a_demo').checked && step === 4) { step = 5; guide() }
       }).catch(function (e) { msg('Error: ' + esc(e.msg || 'could not add')) })
     }
     $('#a_add').onclick = function () { send([{ name: $('#a_n').value, email: $('#a_e').value, school: SCHOOL }]) }
     $('#a_bulkgo').onclick = function () {
-      var rows = $('#a_bulk').value.split(/\r?\n/).map(function (l) { return l.trim() }).filter(Boolean).map(function (l) {
+      send($('#a_bulk').value.split(/\r?\n/).map(function (l) { return l.trim() }).filter(Boolean).map(function (l) {
         var p = l.split(/[,\t;]/).map(function (x) { return x.trim() })
         if (p.length === 1 && /@/.test(p[0])) return { name: '', email: p[0], school: SCHOOL }
         if (/@/.test(p[0]) && !/@/.test(p[1] || '')) return { name: p[1] || '', email: p[0], school: SCHOOL }
         return { name: p[0], email: p[1] || '', school: SCHOOL }
-      })
-      send(rows)
+      }))
     }
-    function list() {
-      rpc('admin_students').then(function (rows) {
-        $('#a_list').innerHTML = '<table class="tests" style="width:100%;min-width:0"><tr><td><b>Name</b></td><td><b>Email</b></td><td><b>School</b></td><td><b>Tests</b></td><td><b>Avg</b></td><td><b>Last sign in</b></td><td></td></tr>' + rows.map(function (r, i) {
-          return '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.email.replace(/@deca\.invalid$/, '')) + '</td><td>' + esc(r.school) + '</td><td>' + r.tests + '</td><td>' + (r.avg == null ? '' : r.avg + '%') + '</td><td>' + (r.last_sign_in ? new Date(r.last_sign_in).toLocaleDateString() : 'never') + '</td><td><button data-pw="' + i + '">Reset password</button>' + (r.is_admin ? '' : ' <button data-rm="' + i + '">Remove</button>') + '</td></tr>'
-        }).join('') + '</table>'
-        $('#a_list').querySelectorAll('[data-pw]').forEach(function (b) { b.onclick = function () {
-          var r = rows[+b.dataset.pw], p = prompt('New password for ' + r.email, '48onDECA'); if (!p) return
-          rpc('admin_set_password', { p_email: r.email, p_password: p }).then(function () { alert('Password changed.') }, function (e) { alert(e.msg) })
-        } })
-        $('#a_list').querySelectorAll('[data-rm]').forEach(function (b) { b.onclick = function () {
-          var r = rows[+b.dataset.rm]; if (!confirm('Remove ' + r.name + ' (' + r.email + ') and all their saved tests?')) return
-          rpc('admin_remove_student', { p_email: r.email }).then(list, function (e) { alert(e.msg) })
-        } })
-      }).catch(function (e) { $('#a_list').textContent = 'Error: ' + (e.msg || 'could not load') })
-    }
-    list()
+    guide()
   }
   function showAccount() {
     clearInterval(timerId); test = null; document.body.className = ''; mark('account'); $('#leg').innerHTML = ''; setBar('My Account - Performance Review')
